@@ -3,3 +3,5 @@ google-genai
 python-dotenv
 passlib[bcrypt]
 fpdf2
+pandas
+altair
