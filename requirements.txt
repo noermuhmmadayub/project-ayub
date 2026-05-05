@@ -5,3 +5,4 @@ passlib[bcrypt]
 fpdf2
 pandas
 altair
+pypdf

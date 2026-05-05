@@ -57,10 +57,13 @@ flowchart LR
   U --> UC3([💬 Chat dengan AI])
   U --> UC4([📂 Kelola sesi chat])
   U --> UC5([🔎 Cari riwayat materi])
-  U --> UC6([📊 Dashboard statistik])
+  U --> UC6([📊 Dashboard Mahasiswa])
   U --> UC7([📥 Ekspor sesi MD/TXT/PDF])
   U --> UC8([🗄️ Backup / restore DB])
   U --> UC9([📖 Jawaban berbasis RAG])
+  U --> UC10([👤 Profil & target belajar])
+  U --> UC11([⭐ Bookmark & prompt tersimpan])
+  U --> UC12([⚙️ Panel Admin])
 
   style U fill:#e3f2fd
 ```
@@ -75,14 +78,16 @@ flowchart TD
   D -->|Ya| E[Muat sesi terbaru / buat sesi]
   D -->|Tidak| C
   B -->|Ya / token URL valid| E
-  E --> F[Menu: Chat atau Dashboard]
+  E --> F[Menu: Chat / Dashboard / Admin]
   F --> G[Chat: ketik pertanyaan]
+  F --> ADM[Admin: kelola user]
   G --> H[(Simpan pesan user)]
   H --> I[AI streaming + opsi RAG]
   I --> J[(Simpan jawaban asisten)]
   J --> K{Ekspor / sesi baru / logout?}
   K --> F
   K --> L([Logout → hapus auth URL])
+  ADM --> F
 
   style A fill:#fff3e0
   style I fill:#e8f5e9
@@ -132,7 +137,7 @@ sequenceDiagram
   Repo->>DB: INSERT chat_messages
   UI->>RAG: retrieve konteks (query)
   RAG->>API: embed / similarity (sesuai implementasi)
-  UI->>AI: stream_answer(prompt, history)
+  UI->>AI: stream_answer(prompt, history, rag_scope)
   AI->>API: generateContent streaming
   loop Token streaming
     API-->>AI: chunk teks
@@ -157,6 +162,11 @@ classDiagram
     +TEXT username UK
     +TEXT password_hash
     +TEXT created_at
+    +TEXT role
+    +TEXT nim
+    +TEXT cohort
+    +TEXT interests
+    +INTEGER weekly_message_goal
   }
 
   class chat_sessions {
@@ -165,6 +175,7 @@ classDiagram
     +TEXT title
     +INTEGER is_pinned
     +TEXT started_at
+    +TEXT rag_scope
   }
 
   class chat_messages {
@@ -175,8 +186,25 @@ classDiagram
     +TEXT created_at
   }
 
+  class saved_prompts {
+    +INTEGER id PK
+    +INTEGER user_id FK
+    +TEXT title
+    +TEXT prompt_text
+  }
+
+  class message_bookmarks {
+    +INTEGER id PK
+    +INTEGER user_id FK
+    +INTEGER message_id FK
+    +TEXT note
+  }
+
   users "1" --> "*" chat_sessions : memiliki
   chat_sessions "1" --> "*" chat_messages : berisi
+  users "1" --> "*" saved_prompts : menyimpan
+  users "1" --> "*" message_bookmarks : menyimpan
+  chat_messages "1" --> "*" message_bookmarks : ditandai
 
   class ChatRepository {
     +authenticate_user()
@@ -204,9 +232,11 @@ classDiagram
     +title
     +started_at
     +is_pinned
+    +rag_scope
   }
 
   class ChatMessage {
+    +id
     +role
     +content
     +created_at
@@ -228,18 +258,24 @@ Berikut definisi logis yang dipakai aplikasi (sumber: `src/database/schema.sql`)
 |-------|------|------------|
 | `id` | INTEGER PK AUTOINCREMENT | Identitas unik pengguna |
 | `username` | TEXT NOT NULL UNIQUE | Nama login |
-| `password_hash` | TEXT NOT NULL | Hash kata sandi (bukan plaintext) |
+| `password_hash` | TEXT NOT NULL | Hash kata sandi |
 | `created_at` | TEXT DEFAULT CURRENT_TIMESTAMP | Waktu pendaftaran |
+| `role` | TEXT NOT NULL DEFAULT `user` | `user` atau `admin` |
+| `nim` | TEXT | NIM (opsional) |
+| `cohort` | TEXT | Angkatan (opsional) |
+| `interests` | TEXT | Minat/topik (opsional) |
+| `weekly_message_goal` | INTEGER DEFAULT 12 | Target pesan/minggu (dashboard) |
 
 ### 3.2 Tabel `chat_sessions`
 
 | Kolom | Tipe | Keterangan |
 |-------|------|------------|
-| `id` | INTEGER PK AUTOINCREMENT | ID sesi percakapan |
-| `user_id` | INTEGER NOT NULL FK → `users(id)` ON DELETE CASCADE | Pemilik sesi |
-| `title` | TEXT | Judul sesi (bisa diubah / otomatis dari prompt pertama) |
-| `is_pinned` | INTEGER NOT NULL DEFAULT 0 | Pin sesi di daftar (0/1) |
+| `id` | INTEGER PK AUTOINCREMENT | ID sesi |
+| `user_id` | INTEGER NOT NULL FK → `users(id)` ON DELETE CASCADE | Pemilik |
+| `title` | TEXT | Judul sesi |
+| `is_pinned` | INTEGER NOT NULL DEFAULT 0 | Pin (0/1) |
 | `started_at` | TEXT DEFAULT CURRENT_TIMESTAMP | Awal sesi |
+| `rag_scope` | TEXT NOT NULL DEFAULT `all` | `all` atau `sttnf` (filter nama berkas RAG) |
 
 ### 3.3 Tabel `chat_messages`
 
@@ -247,27 +283,55 @@ Berikut definisi logis yang dipakai aplikasi (sumber: `src/database/schema.sql`)
 |-------|------|------------|
 | `id` | INTEGER PK AUTOINCREMENT | ID pesan |
 | `session_id` | INTEGER NOT NULL FK → `chat_sessions(id)` ON DELETE CASCADE | Sesi induk |
-| `role` | TEXT CHECK IN ('user','assistant') | Peran pesan (bukan role admin) |
+| `role` | TEXT CHECK IN ('user','assistant') | Peran pesan chat |
 | `content` | TEXT NOT NULL | Isi pesan |
-| `created_at` | TEXT DEFAULT CURRENT_TIMESTAMP | Waktu penyimpanan |
+| `created_at` | TEXT DEFAULT CURRENT_TIMESTAMP | Waktu simpan |
 
-### 3.4 Indeks
+### 3.4 Tabel `saved_prompts`
 
-- `idx_chat_sessions_user_id` pada `chat_sessions(user_id)`
-- `idx_chat_messages_session_id` pada `chat_messages(session_id)`
+| Kolom | Tipe | Keterangan |
+|-------|------|------------|
+| `id` | INTEGER PK AUTOINCREMENT | ID |
+| `user_id` | INTEGER NOT NULL FK → `users(id)` ON DELETE CASCADE | Pemilik |
+| `title` | TEXT NOT NULL | Judul ringkas |
+| `prompt_text` | TEXT NOT NULL | Teks prompt |
+| `created_at` | TEXT DEFAULT CURRENT_TIMESTAMP | Dibuat |
 
-### 3.5 Diagram relasi (ER ringkas)
+### 3.5 Tabel `message_bookmarks`
+
+| Kolom | Tipe | Keterangan |
+|-------|------|------------|
+| `id` | INTEGER PK AUTOINCREMENT | ID bookmark |
+| `user_id` | INTEGER NOT NULL FK → `users(id)` ON DELETE CASCADE | Pemilik |
+| `message_id` | INTEGER NOT NULL FK → `chat_messages(id)` ON DELETE CASCADE | Pesan yang ditandai |
+| `note` | TEXT | Catatan opsional |
+| `created_at` | TEXT DEFAULT CURRENT_TIMESTAMP | Dibuat |
+
+**Unik:** kombinasi `(user_id, message_id)`.
+
+### 3.6 Indeks
+
+- `idx_chat_sessions_user_id`, `idx_chat_messages_session_id`
+- `idx_saved_prompts_user_id`, `idx_message_bookmarks_user_id`
+
+### 3.7 Diagram relasi (ER ringkas)
 
 ```mermaid
 erDiagram
   users ||--o{ chat_sessions : owns
   chat_sessions ||--o{ chat_messages : contains
+  users ||--o{ saved_prompts : saves
+  users ||--o{ message_bookmarks : bookmarks
+  chat_messages ||--o{ message_bookmarks : marked_by
 
   users {
     int id PK
     string username UK
     string password_hash
-    string created_at
+    string role
+    string nim
+    string cohort
+    int weekly_message_goal
   }
 
   chat_sessions {
@@ -275,7 +339,7 @@ erDiagram
     int user_id FK
     string title
     int is_pinned
-    string started_at
+    string rag_scope
   }
 
   chat_messages {
@@ -283,7 +347,19 @@ erDiagram
     int session_id FK
     string role
     string content
-    string created_at
+  }
+
+  saved_prompts {
+    int id PK
+    int user_id FK
+    string title
+    string prompt_text
+  }
+
+  message_bookmarks {
+    int id PK
+    int user_id FK
+    int message_id FK
   }
 ```
 
@@ -298,23 +374,23 @@ Semua fitur berikut memerlukan **login**; data dibatasi per `user_id`.
 | Area | Fitur |
 |------|--------|
 | **Autentikasi** | Register, login, logout, refresh; persistensi lewat query `auth` |
-| **Preferensi** | Tema Light/Dark, menu Chat / Dashboard |
+| **Preferensi** | Tema Light/Dark, menu Chat / Dashboard Mahasiswa |
 | **Chat** | Input pertanyaan, mode belajar, quick prompt, streaming jawaban, flashcard |
 | **Sesi** | Buat/pilih sesi, rename, pin, hapus, cari riwayat |
-| **RAG** | Konteks dari `data/knowledge`, kutipan sumber di jawaban |
+| **RAG** | Konteks dari `data/knowledge` (+ `uploads/`), filter `rag_scope`, kutipan sumber di jawaban |
 | **Ekspor** | Unduh sesi aktif: `.md`, `.txt`, `.pdf` |
-| **Dashboard** | Statistik aktivitas, grafik, ringkasan |
-| **Data** | Backup/restore file SQLite (sidebar, sesuai implementasi UI) |
+| **Dashboard Mahasiswa** | Target mingguan (DB), sesi pin, materi RAG, statistik, grafik & frekuensi sumber RAG |
+| **Alat sidebar** | Profil, prompt tersimpan, bookmark, unggah PDF, filter RAG sesi; pengingat idle |
+| **Data** | Backup/restore SQLite dari sidebar; skrip `scripts/backup_sqlite.py` |
 
 ### 4.2 Modul administrator (panel dalam aplikasi)
 
 | Status | Penjelasan |
 |--------|------------|
-| **❌ Tidak tersedia** | Aplikasi ini **tidak** memiliki halaman admin terpisah, role `admin` di database, atau hak akses untuk mengelola semua pengguna dari UI. |
-| **Hak akses** | Setiap pengguna hanya mengakses **sesi dan pesan miliknya sendiri** (filter `user_id` pada query). |
-| **Administrasi teknis (luar UI)** | Mengatur **`.env`** (`GEMINI_API_KEY`, `AUTH_SECRET_KEY`), menyalin/menyimpan file **`data/app.db`**, deploy server, dan menambah dokumen **`data/knowledge`** dilakukan oleh **pengembang/operator**, bukan lewat modul admin. |
-
-> 💡 **Ruang pengembangan:** Jika skripsi membutuhkan modul admin eksplisit, bisa dirancang sebagai halaman Streamlit kedua dengan tabel `role` dan middleware pengecekan — saat ini **belum** diimplementasikan.
+| **✅ Tersedia** | Menu **Admin** (sidebar) untuk pengguna dengan `role = 'admin'`. Menampilkan statistik global, daftar pengguna, pengaturan password, dan perubahan role (`user` / `admin`). |
+| **Menjadi admin pertama** | Set `ADMIN_USERNAMES` di `.env` (username dipisah koma, sama persis dengan username login). Saat aplikasi start, user tersebut dipromosikan ke admin. Tanpa itu, naikkan role lewat SQL manual atau lewat admin lain. |
+| **Hak akses mahasiswa** | Pengguna biasa hanya mengakses **sesi dan pesan miliknya**; admin mengelola akun dari panel terpisah. |
+| **Administrasi teknis** | Backup DB, refresh indeks RAG, dan unggah knowledge bisa juga lewat skrip / folder `data/knowledge` oleh operator. |
 
 ---
 
@@ -329,7 +405,8 @@ Semua fitur berikut memerlukan **login**; data dibatasi per `user_id`.
 | **Logout** | Mereset state dan **menghapus** parameter `auth` dari URL. |
 | **API Gemini** | Kunci `GEMINI_API_KEY` hanya di server/environment (`.env`), tidak dikirim ke browser sebagai nilai teks di UI. |
 | **Isolasi data** | Query repositori menyertakan `user_id` / join ke sesi milik pengguna agar tidak membaca data pengguna lain. |
-| **File upload pengguna** | Tidak ada unggah file generik ke server dalam alur utama; RAG membaca file statis dari folder proyek. |
+| **File upload (PDF)** | PDF diunggah dari UI → teks diekstrak ke `data/knowledge/uploads/*.txt` lalu indeks embedding diperbarui; batasi izin folder di produksi. |
+| **Logging** | Event ringan (mis. login sukses) ke `logs/app.log`; tidak mencatat isi password. |
 
 ---
 
@@ -341,8 +418,9 @@ Aplikasi ini adalah **satu skrip Streamlit** (`app.py`), **bukan** backend REST 
 
 | Rute logis | Deskripsi |
 |------------|-----------|
-| **Chat** | Tampilan utama: hero, toolbar belajar, riwayat pesan, input chat, session tools |
-| **Dashboard** | Statistik & grafik untuk pengguna yang login |
+| **Chat** | Hero, toolbar, riwayat + bookmark per pesan, input chat, session tools, expander mahasiswa di sidebar |
+| **Dashboard Mahasiswa** | Statistik, target 7 hari (DB), pin, knowledge, frekuensi sumber RAG |
+| **Admin** | Statistik global, daftar user, reset password, ubah role (hanya jika `role=admin`) |
 
 ### 6.2 URL & query
 
@@ -350,6 +428,8 @@ Aplikasi ini adalah **satu skrip Streamlit** (`app.py`), **bukan** backend REST 
 |------|--------|
 | `http://localhost:8501/` | Halaman default aplikasi |
 | `http://localhost:8501/?auth=<token>` | Memulihkan sesi login via token bertanda tangan (jika valid) |
+
+Menu sidebar (widget `radio`, key `main_menu_v3`): **Chat**, **Dashboard Mahasiswa**, dan **Admin** (jika pengguna admin).
 
 ### 6.3 Bukan “rute API” klasik
 
@@ -364,7 +444,7 @@ flowchart LR
 
   subgraph Halaman_dalam_app
     M1[📝 Chat]
-    M2[📊 Dashboard]
+    M2[📊 Dashboard Mahasiswa]
   end
 
   H1 --> M1

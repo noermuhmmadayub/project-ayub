@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import hmac
+import io
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -16,8 +18,24 @@ from fpdf import FPDF
 from src.config.settings import Settings, get_settings
 from src.database.connection import DatabaseConnection
 from src.database.repository import ChatRepository
+from src.observability import setup_app_logging
 from src.services.chatbot import GeminiChatbotService
 from src.services.rag import SimpleRAG
+
+MENU_CHAT = "Chat"
+MENU_DASHBOARD = "Dashboard Mahasiswa"
+MENU_ADMIN = "Admin"
+
+
+def list_knowledge_filenames() -> List[str]:
+    root = Path("data/knowledge")
+    if not root.exists():
+        return []
+    names: List[str] = []
+    for file_path in sorted(root.rglob("*")):
+        if file_path.is_file() and file_path.suffix.lower() in {".md", ".txt"}:
+            names.append(file_path.name)
+    return sorted(names)
 
 
 def apply_ui_theme(theme_mode: str) -> None:
@@ -288,7 +306,7 @@ def restore_auth_from_query(settings: Settings, repository: ChatRepository) -> N
 
 def load_chat_history(repository: ChatRepository, session_id: int) -> List[Dict[str, str]]:
     messages = repository.list_messages(session_id)
-    return [{"role": msg.role, "content": msg.content} for msg in messages]
+    return [{"id": msg.id, "role": msg.role, "content": msg.content} for msg in messages]
 
 
 def export_chat_markdown(title: str, messages: List[Dict[str, str]]) -> str:
@@ -390,6 +408,7 @@ def render_auth_controls(repository: ChatRepository) -> None:
                 st.session_state["active_session_id"] = repository.get_latest_session_id(user_id)
                 token = _build_auth_token(user_id, username.strip(), get_settings().auth_secret_key)
                 st.query_params["auth"] = token
+                logging.getLogger(__name__).info("login ok user_id=%s username=%s", user_id, username.strip())
                 st.rerun()
 
     with tab_register:
@@ -431,6 +450,170 @@ def render_logged_out_view() -> None:
         st.caption(
             "Tips: gunakan akun testing `tester_edu` jika ingin uji cepat tanpa registrasi ulang."
         )
+
+
+def render_student_sidebar_extras(
+    repository: ChatRepository,
+    chatbot: GeminiChatbotService,
+    user_id: int,
+    active_session_id: int,
+) -> None:
+    st.sidebar.markdown(
+        '<div class="sidebar-section-title">Dashboard Mahasiswa (alat)</div>',
+        unsafe_allow_html=True,
+    )
+    gap = repository.days_since_last_message(user_id)
+    total_m = repository.count_messages(user_id)
+    if total_m == 0:
+        st.sidebar.info("Mulai percakapan pertama lewat area chat.")
+    elif gap is not None and gap >= 3:
+        st.sidebar.warning(f"Sudah ~{int(gap)} hari sejak pesan terakhir. Yuk lanjut belajar.")
+
+    with st.sidebar.expander("Profil", expanded=False):
+        user = repository.get_user_by_id(user_id) or {}
+        nim = st.text_input("NIM", value=str(user.get("nim") or ""), key="prof_nim")
+        cohort = st.text_input("Angkatan", value=str(user.get("cohort") or ""), key="prof_cohort")
+        interests = st.text_area(
+            "Minat / topik",
+            value=str(user.get("interests") or ""),
+            key="prof_interests",
+            height=68,
+        )
+        weekly = st.number_input(
+            "Target pesan / minggu (disimpan)",
+            min_value=1,
+            max_value=999,
+            value=int(user.get("weekly_message_goal") or 12),
+            key="prof_weekly",
+        )
+        if st.button("Simpan profil", key="prof_save"):
+            repository.update_user_profile(
+                user_id,
+                nim=nim,
+                cohort=cohort,
+                interests=interests,
+                weekly_message_goal=weekly,
+            )
+            st.success("Profil diperbarui.")
+
+    with st.sidebar.expander("Filter RAG (sesi ini)", expanded=False):
+        current = repository.get_session_rag_scope(user_id, active_session_id)
+        idx = 0 if current == "all" else 1
+        choice = st.selectbox(
+            "Sumber konteks retrieval",
+            options=["all", "sttnf"],
+            index=idx,
+            key=f"rag_scope_sel_{active_session_id}",
+            format_func=lambda x: "Semua dokumen" if x == "all" else "Berkas berisi 'sttnf' di nama",
+        )
+        if choice != current:
+            repository.set_session_rag_scope(user_id, active_session_id, choice)
+            st.rerun()
+
+    with st.sidebar.expander("Prompt tersimpan", expanded=False):
+        prompts = repository.list_saved_prompts(user_id)
+        for p in prompts:
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                if st.button(p.title[:36] + ("…" if len(p.title) > 36 else ""), key=f"use_prompt_{p.id}"):
+                    st.session_state["pending_prompt"] = p.prompt_text
+                    st.rerun()
+            with c2:
+                if st.button("×", key=f"del_prompt_{p.id}"):
+                    repository.delete_saved_prompt(user_id, p.id)
+                    st.rerun()
+        nt = st.text_input("Judul prompt baru", key="new_prompt_title")
+        pt = st.text_area("Teks prompt", key="new_prompt_body", height=72)
+        if st.button("Tambah prompt", key="add_prompt"):
+            pid = repository.add_saved_prompt(user_id, nt, pt)
+            if pid:
+                st.success("Tersimpan.")
+                st.rerun()
+            else:
+                st.error("Judul atau teks terlalu pendek.")
+
+    with st.sidebar.expander("Bookmark pesan", expanded=False):
+        marks = repository.list_message_bookmarks(user_id)
+        if not marks:
+            st.caption("Belum ada bookmark.")
+        for bm in marks:
+            st.caption(f"{bm.session_title}")
+            st.text((bm.content_preview or "")[:180])
+            if st.button("Hapus", key=f"rmbm_{bm.id}"):
+                repository.remove_message_bookmark(user_id, bm.id)
+                st.rerun()
+
+    with st.sidebar.expander("Unggah PDF ke RAG", expanded=False):
+        up = st.file_uploader("PDF", type=["pdf"], key="rag_pdf_up")
+        if up and st.button("Ekstrak & indeks ulang", key="rag_pdf_go"):
+            try:
+                from pypdf import PdfReader
+
+                reader = PdfReader(io.BytesIO(up.getvalue()))
+                parts = [(pg.extract_text() or "") for pg in reader.pages]
+                text = "\n".join(parts).strip()
+                if not text:
+                    st.error("Tidak ada teks yang bisa diekstrak dari PDF ini.")
+                else:
+                    safe = re.sub(r"[^\w\-.]+", "_", Path(up.name).stem)[:50]
+                    dest = Path("data/knowledge/uploads")
+                    dest.mkdir(parents=True, exist_ok=True)
+                    out = dest / f"u{user_id}_{safe}.txt"
+                    out.write_text(text[:250_000], encoding="utf-8")
+                    nvec = chatbot.rag.force_rebuild_embedding_cache()
+                    st.success(f"Berhasil: {out.name}. Vektor indeks: {nvec} potongan.")
+            except Exception as exc:
+                st.error(f"Gagal memproses PDF: {exc}")
+
+
+def render_admin_panel(repository: ChatRepository, admin_user_id: int) -> None:
+    st.markdown('<h1 class="hero-title">Panel Admin</h1>', unsafe_allow_html=True)
+    if not repository.is_admin(admin_user_id):
+        st.error("Anda tidak memiliki akses admin.")
+        return
+
+    stats = repository.admin_global_stats()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Pengguna", stats["users"])
+    c2.metric("Sesi", stats["sessions"])
+    c3.metric("Pesan", stats["messages"])
+
+    users = repository.admin_list_users()
+    st.markdown("### Daftar pengguna")
+    st.dataframe(
+        pd.DataFrame(users),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.markdown("### Kelola akun")
+    if not users:
+        st.info("Belum ada pengguna.")
+        return
+
+    labels = [f"{u['id']} — {u['username']} ({u['role']})" for u in users]
+    pick = st.selectbox("Pilih pengguna", options=labels, key="admin_pick_user")
+    target_id = int(pick.split("—", 1)[0].strip())
+
+    row_a, row_b = st.columns(2)
+    with row_a:
+        npw = st.text_input("Password baru (min 6 karakter)", type="password", key="admin_new_pw")
+        if st.button("Terapkan password", key="admin_set_pw"):
+            if repository.admin_set_password(target_id, npw):
+                st.success("Password diperbarui.")
+            else:
+                st.error("Password minimal 6 karakter.")
+
+    with row_b:
+        target_user = next((u for u in users if int(u["id"]) == target_id), None)
+        role_idx = 1 if target_user and str(target_user.get("role")) == "admin" else 0
+        new_role = st.selectbox("Role", options=["user", "admin"], index=role_idx, key="admin_new_role")
+        if st.button("Simpan role", key="admin_set_role"):
+            if target_id == admin_user_id and new_role == "user":
+                st.warning("Jangan hilangkan hak admin pada diri sendiri lewat UI ini.")
+            elif repository.admin_set_role(target_id, new_role):
+                st.success("Role diperbarui. Muat ulang jika perlu.")
+                st.rerun()
 
 
 def render_sidebar(repository: ChatRepository, settings: Settings) -> None:
@@ -660,7 +843,7 @@ def extract_flashcards(answer: str, max_cards: int = 4) -> List[str]:
     return selected[:max_cards]
 
 
-def render_chat_messages(messages: List[Dict[str, str]]) -> None:
+def render_chat_messages(repository: ChatRepository, user_id: int, messages: List[Dict[str, str]]) -> None:
     for message in messages:
         avatar = "👩‍🎓" if message["role"] == "user" else "🤖"
         with st.chat_message(message["role"], avatar=avatar):
@@ -674,9 +857,20 @@ def render_chat_messages(messages: List[Dict[str, str]]) -> None:
                 )
             else:
                 st.markdown(content)
+            mid = message.get("id")
+            if mid is not None:
+                if st.button("⭐ Bookmark", key=f"bookmark_row_{mid}", help="Simpan cuplikan ke panel Bookmark"):
+                    if repository.add_message_bookmark(user_id, int(mid)):
+                        st.caption("Ditambahkan ke bookmark.")
+                    else:
+                        st.caption("Sudah ada atau gagal.")
 
 
-def render_learning_actions(chatbot: GeminiChatbotService, history: List[Dict[str, str]]) -> None:
+def render_learning_actions(
+    chatbot: GeminiChatbotService,
+    history: List[Dict[str, str]],
+    rag_scope: str,
+) -> None:
     st.markdown('<div class="content-shell">', unsafe_allow_html=True)
     st.markdown("### Aksi Belajar Lanjutan")
     st.caption("Gunakan jawaban terakhir AI untuk memperdalam pemahaman tanpa keluar dari sesi.")
@@ -695,7 +889,7 @@ def render_learning_actions(chatbot: GeminiChatbotService, history: List[Dict[st
         )
         result = ""
         with st.spinner("Menyusun ringkasan..."):
-            for token in chatbot.stream_answer(prompt, history=history):
+            for token in chatbot.stream_answer(prompt, history=history, rag_scope=rag_scope):
                 result += token
         st.session_state["learning_artifact_title"] = "Ringkasan 5 Poin"
         st.session_state["learning_artifact_content"] = result.strip()
@@ -709,7 +903,7 @@ def render_learning_actions(chatbot: GeminiChatbotService, history: List[Dict[st
         )
         result = ""
         with st.spinner("Menyusun kuis..."):
-            for token in chatbot.stream_answer(prompt, history=history):
+            for token in chatbot.stream_answer(prompt, history=history, rag_scope=rag_scope):
                 result += token
         st.session_state["learning_artifact_title"] = "Kuis 5 Soal"
         st.session_state["learning_artifact_content"] = result.strip()
@@ -724,16 +918,21 @@ def render_learning_actions(chatbot: GeminiChatbotService, history: List[Dict[st
     st.markdown("</div>", unsafe_allow_html=True)
 
 
-def render_dashboard(repository: ChatRepository, user_id: int, app_name: str) -> None:
-    st.markdown(f'<h1 class="hero-title">Dashboard {app_name}</h1>', unsafe_allow_html=True)
+def render_dashboard(repository: ChatRepository, user_id: int, app_name: str, username: str) -> None:
     st.markdown(
-        '<div class="hero-subtitle">Ringkasan aktivitas belajar dan percakapan AI.</div>',
+        f'<h1 class="hero-title">Dashboard Mahasiswa</h1>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        f'<div class="hero-subtitle">Halo <strong>{username}</strong> — ringkasan belajar lewat '
+        f'<em>{app_name}</em>: aktivitas chat, target mingguan, sesi pin, dan sumber RAG.</div>',
         unsafe_allow_html=True,
     )
 
     total_sessions = repository.count_sessions(user_id)
     total_messages = repository.count_messages(user_id)
     avg_messages = round(total_messages / total_sessions, 2) if total_sessions else 0.0
+    msgs_week = repository.count_messages_in_last_days(user_id, 7)
 
     st.markdown(
         f"""
@@ -754,6 +953,58 @@ def render_dashboard(repository: ChatRepository, user_id: int, app_name: str) ->
         """,
         unsafe_allow_html=True,
     )
+
+    prof = repository.get_user_by_id(user_id) or {}
+    db_goal = int(prof.get("weekly_message_goal") or 12)
+
+    goal_col, pin_col, rag_col = st.columns([1.1, 1, 1])
+    with goal_col:
+        st.markdown("### Target belajar (7 hari)")
+        goal = st.number_input(
+            "Target jumlah pesan (rolling 7 hari)",
+            min_value=1,
+            max_value=999,
+            value=db_goal,
+            key=f"dash_weekly_goal_{user_id}",
+            help="Disimpan di profil. Menghitung semua pesan user & asisten.",
+        )
+        if goal != db_goal:
+            repository.update_weekly_message_goal(user_id, goal)
+            st.rerun()
+        ratio = min(1.0, msgs_week / goal) if goal else 0.0
+        st.progress(ratio)
+        st.caption(f"Progres: **{msgs_week}** / **{goal}** pesan (rolling 7 hari).")
+
+    sessions = repository.list_sessions(user_id)
+    pinned = [s for s in sessions if s.is_pinned]
+
+    with pin_col:
+        st.markdown("### Sesi di-pin")
+        if pinned:
+            for s in pinned:
+                row1, row2 = st.columns([2, 1])
+                with row1:
+                    st.markdown(f"📌 **{s.title}**")
+                with row2:
+                    if st.button("Buka", key=f"dash_open_pin_{s.id}", use_container_width=True):
+                        st.session_state["active_session_id"] = s.id
+                        st.session_state["main_menu_v3"] = MENU_CHAT
+                        st.rerun()
+        else:
+            st.info("Belum ada sesi di-pin. Di menu Chat, buka **Kelola Sesi Aktif**.")
+
+    with rag_col:
+        st.markdown("### Materi RAG tersedia")
+        k_files = list_knowledge_filenames()
+        if k_files:
+            st.caption(f"{len(k_files)} berkas di `data/knowledge`")
+            with st.expander("Lihat daftar", expanded=False):
+                for name in k_files:
+                    st.markdown(f"- `{name}`")
+        else:
+            st.warning("Folder `data/knowledge` kosong atau belum ada `.md`/`.txt`.")
+
+    st.divider()
 
     period_col, view_col = st.columns([1, 1])
     with period_col:
@@ -824,18 +1075,42 @@ def render_dashboard(repository: ChatRepository, user_id: int, app_name: str) ->
     else:
         st.info("Belum ada data sesi aktif.")
 
+    rag_hits = repository.rag_source_frequency(user_id, limit=10)
+    st.markdown("### Sumber belajar (RAG) paling sering dipakai")
+    if rag_hits:
+        rag_df = pd.DataFrame(rag_hits, columns=["Berkas sumber", "Jumlah"])
+        rag_chart = (
+            alt.Chart(rag_df)
+            .mark_bar(cornerRadiusTopRight=6, cornerRadiusBottomRight=6)
+            .encode(
+                x=alt.X("Jumlah:Q", title="Kutipan dalam jawaban"),
+                y=alt.Y("Berkas sumber:N", sort="-x", title="Sumber"),
+                color=alt.Color("Jumlah:Q", legend=None),
+                tooltip=[
+                    alt.Tooltip("Berkas sumber:N", title="Sumber"),
+                    alt.Tooltip("Jumlah:Q", title="Jumlah"),
+                ],
+            )
+        )
+        st.altair_chart(rag_chart, use_container_width=True)
+        st.caption("Dihitung dari jawaban asisten yang memuat blok **Sumber RAG** (nama berkas dalam backtick).")
+    else:
+        st.info("Belum ada riwayat kutipan RAG. Ajukan pertanyaan terkait materi kampus di menu Chat.")
+
     st.markdown("### Insight Singkat")
     if total_messages == 0:
         st.caption("Belum ada percakapan. Mulai dari menu Chat untuk membangun data dashboard.")
     else:
         st.caption(
-            f"Kamu punya {total_sessions} sesi dengan total {total_messages} pesan. "
-            f"Rata-rata {avg_messages} pesan per sesi, cocok untuk melihat topik yang paling sering dipelajari."
+            f"Kamu punya {total_sessions} sesi dengan total {total_messages} pesan "
+            f"({msgs_week} pesan dalam 7 hari terakhir). "
+            f"Rata-rata {avg_messages} pesan per sesi — lanjutkan pola belajar rutin lewat chat."
         )
 
 
 def main() -> None:
     settings = get_settings()
+    setup_app_logging()
     initialize_state()
     st.set_page_config(page_title=settings.app_name, layout="wide")
     st.sidebar.subheader("Preferensi Tampilan")
@@ -871,20 +1146,27 @@ def main() -> None:
 
     st.sidebar.divider()
     st.sidebar.subheader("Menu")
+    menu_options = [MENU_CHAT, MENU_DASHBOARD]
+    if repository.is_admin(user_id):
+        menu_options.append(MENU_ADMIN)
     current_menu = st.sidebar.radio(
         "Pilih halaman",
-        options=["Chat", "Dashboard"],
-        key="main_menu",
-        horizontal=True,
+        options=menu_options,
+        key="main_menu_v3",
     )
-    if current_menu == "Dashboard":
-        render_dashboard(repository, user_id, settings.app_name)
+    if current_menu == MENU_DASHBOARD:
+        render_dashboard(repository, user_id, settings.app_name, st.session_state.get("username", ""))
+        return
+    if current_menu == MENU_ADMIN:
+        render_admin_panel(repository, user_id)
         return
 
     render_sidebar(repository, settings)
+    render_student_sidebar_extras(repository, chatbot, user_id, active_session_id)
 
     history = load_chat_history(repository, active_session_id)
     sessions = repository.list_sessions(user_id)
+    rag_scope = repository.get_session_rag_scope(user_id, active_session_id)
     render_hero(
         app_name=settings.app_name,
         sessions_count=len(sessions),
@@ -892,8 +1174,8 @@ def main() -> None:
         answer_mode=st.session_state.get("answer_mode", "Penjelasan Detail"),
     )
     render_learning_toolbar()
-    render_chat_messages(history)
-    render_learning_actions(chatbot, history)
+    render_chat_messages(repository, user_id, history)
+    render_learning_actions(chatbot, history, rag_scope=rag_scope)
 
     active_session = next((item for item in sessions if item.id == active_session_id), None)
     export_title = active_session.title if active_session else "Sesi Baru"
@@ -952,7 +1234,11 @@ def main() -> None:
         sources: List[str] = []
         try:
             with st.status("AI sedang menyusun jawaban...", expanded=False):
-                for token in chatbot.stream_answer(final_prompt, history=conversation_history[:-1]):
+                for token in chatbot.stream_answer(
+                    final_prompt,
+                    history=conversation_history[:-1],
+                    rag_scope=rag_scope,
+                ):
                     full_response += token
                     placeholder.markdown(full_response)
             sources = chatbot.get_last_sources()

@@ -129,10 +129,17 @@ class SimpleRAG:
     def _tokenize(text: str) -> set[str]:
         return set(re.findall(r"[a-zA-Z0-9_]{3,}", text.lower()))
 
-    def retrieve(self, query: str, top_k: int = 3) -> List[RetrievalChunk]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 3,
+        source_substring: Optional[str] = None,
+    ) -> List[RetrievalChunk]:
         query_tokens = self._tokenize(query)
         if not query_tokens:
             return []
+
+        needle = (source_substring or "").strip().lower()
 
         query_embedding: List[float] = []
         if self.api_key and self.embeddings:
@@ -141,6 +148,8 @@ class SimpleRAG:
 
         scored: List[RetrievalChunk] = []
         for idx, (source, chunk) in enumerate(self.chunks):
+            if needle and needle not in source.lower():
+                continue
             chunk_tokens = self._tokenize(chunk)
             overlap = len(query_tokens.intersection(chunk_tokens))
             semantic_score = 0.0
@@ -161,6 +170,17 @@ class SimpleRAG:
 
         scored.sort(key=lambda item: item.score, reverse=True)
         return scored[:top_k]
+
+    def force_rebuild_embedding_cache(self) -> int:
+        if self.index_path.exists():
+            try:
+                self.index_path.unlink()
+            except OSError:
+                pass
+        self.embeddings = []
+        if self.api_key and self.chunks:
+            self.embeddings = self._load_or_build_embeddings()
+        return len(self.embeddings)
 
     def build_context(
         self,

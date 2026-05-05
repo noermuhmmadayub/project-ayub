@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 from google import genai
 
@@ -24,8 +24,20 @@ class GeminiChatbotService:
             history_lines.append(f"{role}: {message['content']}")
         return "\n".join(history_lines)
 
-    def stream_answer(self, user_prompt: str, history: List[Dict[str, str]]) -> Iterable[str]:
-        retrievals = self.rag.retrieve(user_prompt, top_k=3)
+    def stream_answer(
+        self,
+        user_prompt: str,
+        history: List[Dict[str, str]],
+        rag_scope: Optional[str] = None,
+    ) -> Iterable[str]:
+        source_substring: Optional[str] = None
+        if rag_scope and rag_scope.strip().lower() not in ("", "all"):
+            source_substring = rag_scope.strip().lower()
+        retrievals = self.rag.retrieve(
+            user_prompt,
+            top_k=3,
+            source_substring=source_substring,
+        )
         self._last_sources = list(dict.fromkeys(item.source for item in retrievals))
         rag_context = self.rag.build_context(user_prompt, top_k=3, retrievals=retrievals)
         enriched_prompt = user_prompt

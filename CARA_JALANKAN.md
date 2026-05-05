@@ -51,8 +51,11 @@ pip install -r requirements.txt
    |----------|------------|
    | `GEMINI_API_KEY` | API key dari Google AI Studio / Cloud |
    | `AUTH_SECRET_KEY` | String acak panjang (untuk stabilitas login/token) |
+   | `ADMIN_USERNAMES` | (Opsional) Username admin, pisah koma — setelah itu **restart** app |
 
 Opsional: sesuaikan `MODEL_NAME`, `FALLBACK_MODELS`, `DB_PATH`, `EMBEDDING_MODEL_NAME` jika perlu. **Jangan** meng-commit file `.env` ke Git.
+
+**Perawatan (opsional):** dari folder project, `python scripts/backup_sqlite.py` menyalin DB ke `data/backups/`; `python scripts/refresh_rag_index.py` membangun ulang cache embedding RAG.
 
 ---
 

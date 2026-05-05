@@ -10,6 +10,18 @@ Panduan cepat ini membantu diagnosis masalah umum pada aplikasi chatbot Streamli
 3. Cek `GEMINI_API_KEY` terisi dan valid.
 4. Cek model utama/fallback sudah diset.
 5. Restart app setelah perubahan `.env`.
+6. Setelah `git pull` / update kode: jalankan ulang app sekali agar **migrasi SQLite** (kolom/tabel baru) terpasang.
+
+## Menu Admin tidak muncul
+
+- Hanya user dengan `role = admin` yang melihat menu **Admin**.
+- Set `ADMIN_USERNAMES=namauser` di `.env` (username **persis** seperti di database), lalu **restart** Streamlit.
+- Atau ubah role lewat panel Admin lain / SQL manual pada tabel `users`.
+
+## Unggah PDF gagal / teks kosong
+
+- Beberapa PDF (scan gambar) tidak punya teks; gunakan PDF ber-teks atau tambahkan `.md` manual ke `data/knowledge/`.
+- Pastikan `pypdf` terpasang: `pip install -r requirements.txt`.
 
 ## Konfigurasi Stabil yang Direkomendasikan
 

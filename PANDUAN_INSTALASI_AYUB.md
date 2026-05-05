@@ -91,6 +91,7 @@ Dependency utama project:
 - `fpdf2`
 - `pandas`
 - `altair`
+- `pypdf`
 
 ---
 
@@ -114,11 +115,15 @@ MAX_RETRY_ATTEMPTS=2
 RETRY_DELAY_SECONDS=1.2
 EMBEDDING_MODEL_NAME=text-embedding-004
 AUTH_SECRET_KEY=isi_random_secret_panjang
+
+# Opsional: username (pisahkan koma) yang jadi admin saat app start — harus sudah terdaftar / sama dengan akun Anda.
+# ADMIN_USERNAMES=username_admin
 ```
 
 Catatan:
 - Jangan commit `.env` ke Git.
 - `AUTH_SECRET_KEY` wajib panjang/acak untuk kestabilan login berbasis token.
+- Setelah menambah `ADMIN_USERNAMES`, **restart** Streamlit agar role admin terpasang.
 
 ---
 
@@ -171,21 +176,34 @@ Minimal cek:
 1. Login/Register
 2. Chat normal (streaming jawaban)
 3. Sidebar session (buat/pilih session)
-4. Dashboard statistik
-5. Session tools export (`.md`, `.txt`, `.pdf`)
-6. RAG source muncul pada jawaban
+4. **Dashboard Mahasiswa** (grafik, target, pin, sumber RAG)
+5. **Sidebar alat mahasiswa:** Profil, filter RAG sesi, prompt tersimpan, bookmark, unggah PDF (opsional)
+6. Session tools export (`.md`, `.txt`, `.pdf`)
+7. RAG source muncul pada jawaban (jika dokumen relevan)
+8. Jika `ADMIN_USERNAMES` diset: menu **Admin** — statistik global, reset password user
+
+**Skrip opsional (dari root project):**
+
+```bash
+python scripts/refresh_rag_index.py
+python scripts/backup_sqlite.py
+python scripts/eval_rag_smoke.py
+```
 
 ---
 
 ## 10. Struktur Folder Penting
 
-- `app.py` -> aplikasi Streamlit utama
-- `src/config/settings.py` -> konfigurasi env
-- `src/database/` -> koneksi + repository database
-- `src/services/chatbot.py` -> integrasi model Gemini
-- `src/services/rag.py` -> retrieval knowledge
-- `data/knowledge/` -> sumber knowledge RAG
-- `TROUBLESHOOTING.md` -> panduan penanganan error
+- `app.py` — aplikasi Streamlit (Chat, Dashboard Mahasiswa, Admin)
+- `scripts/` — `refresh_rag_index.py`, `backup_sqlite.py`, `eval_rag_smoke.py`
+- `src/config/settings.py` — konfigurasi env
+- `src/observability.py` — logging ke `logs/app.log`
+- `src/database/` — koneksi + repository + migrasi skema
+- `src/services/chatbot.py` — Gemini + `rag_scope`
+- `src/services/rag.py` — retrieval + rebuild cache
+- `data/knowledge/` — knowledge RAG (termasuk `uploads/` untuk PDF yang diproses)
+- `DOKUMENTASI_SISTEM.md` — diagram & skema
+- `TROUBLESHOOTING.md` — penanganan error
 
 ---
 
@@ -205,7 +223,13 @@ Pembaruan konten: YYYY-MM-DD
 Konten ringkas terstruktur...
 ```
 
-Setelah update knowledge, restart app agar index retrieval dimuat ulang.
+Setelah menambah/mengubah banyak file knowledge, Anda bisa **restart app** atau menjalankan:
+
+```bash
+python scripts/refresh_rag_index.py
+```
+
+PDF yang diunggah lewat UI disimpan sebagai `.txt` di `data/knowledge/uploads/` dan indeks bisa diperbarui otomatis setelah unggah.
 
 ---
 

@@ -28,10 +28,10 @@ Aplikasi **chatbot edukatif** berbasis **Streamlit** dan **Google Gemini** (`goo
 | Aspek | Penjelasan singkat |
 |--------|---------------------|
 | **Peran** | Asisten akademik untuk Prodi TI STT Terpadu Nurul Fikri: jawaban edukatif, bahasa Indonesia, contoh praktis untuk topik teknis. |
-| **Antarmuka** | Web interaktif Streamlit: tema **Light/Dark**, menu **Chat** dan **Dashboard**, sidebar sesi dan alat data. |
+| **Antarmuka** | Web interaktif Streamlit: tema **Light/Dark**, menu **Chat**, **Dashboard Mahasiswa**, dan **Admin** (jika `role=admin`), sidebar lengkap. |
 | **AI** | Generasi lewat **Gemini** dengan **streaming**; **retry** dan **model fallback** jika satu model sibuk atau error. |
 | **Memori** | Riwayat per **sesi chat**; daftar sesi di sidebar; **pin** sesi; pencarian/paginasi riwayat. |
-| **Pengetahuan eksternal** | File `.md`/`.txt` di `data/knowledge` + cache embedding `data/rag_index.json`. |
+| **Pengetahuan eksternal** | File `.md`/`.txt` di `data/knowledge` (termasuk `uploads/`), filter RAG per sesi, cache embedding `data/rag_index.json`. |
 | **Tidak termasuk** | Bukan integrasi **MySQL**; penyimpanan utama adalah **SQLite** (`data/app.db` bawaan konfigurasi). |
 
 ---
@@ -54,22 +54,32 @@ Aplikasi **chatbot edukatif** berbasis **Streamlit** dan **Google Gemini** (`goo
 ### RAG dan kutipan sumber
 
 - **Retrieval hybrid**: skor keyword + kemiripan semantik (**embedding** Gemini).
+- **Filter per sesi**: semua dokumen vs hanya berkas yang namanya mengandung **`sttnf`** (mode kampus).
 - **Sumber RAG** ditampilkan pada jawaban (citation).
-- Dokumen pengetahuan: konten kampus STT-NF dan materi tambahan di `data/knowledge/`.
+- Dokumen pengetahuan di `data/knowledge/`; **unggah PDF** (ekstraksi teks) ke `data/knowledge/uploads/` + rebuild indeks.
 
 ### Ekspor dan data
 
 - **Session tools**: unduh percakapan sesi aktif sebagai **Markdown**, **teks biasa**, atau **PDF** (`fpdf2`).
 - **Alat data**: backup / restore database SQLite dari antarmuka (sidebar).
 
-### Dashboard
+### Dashboard Mahasiswa
 
-- Halaman **Dashboard**: aktivitas pesan, sesi teratas, ringkasan statistik, grafik interaktif (**Altair**), tabel detail (opsional).
+- Ringkasan **total sesi / pesan**, **target belajar rolling 7 hari** (progress bar), **sesi di-pin** dengan tombol buka ke Chat.
+- Daftar **materi RAG** (`data/knowledge`), grafik aktivitas harian, sesi paling aktif, dan **sumber RAG paling sering** dari riwayat jawaban.
 
 ### Autentikasi
 
 - **Registrasi / login** multi-akun; kata sandi di-hash (**passlib**, skema PBKdf2 di implementasi saat ini).
 - **Token login** di query string (signed) untuk **persistensi** setelah refresh (bergantung pada `AUTH_SECRET_KEY`).
+- **Admin** (menu sidebar): statistik global, reset password, ubah role. User pertama dengan hak admin: set **`ADMIN_USERNAMES`** di `.env` (username dipisah koma).
+
+### Mahasiswa (sidebar Chat)
+
+- **Profil** (NIM, angkatan, minat, target pesan/minggu) tersimpan di SQLite.
+- **Prompt tersimpan** dan **bookmark pesan**; **filter RAG per sesi** (`semua` vs berkas bernama mengandung `sttnf`).
+- **Unggah PDF** ke `data/knowledge/uploads/` + rebuild indeks embedding; pengingat jika sudah lama tidak chat.
+- **Skrip opsional:** `python scripts/refresh_rag_index.py`, `python scripts/backup_sqlite.py`, `python scripts/eval_rag_smoke.py` — log di `logs/app.log`.
 
 ---
 
@@ -85,6 +95,7 @@ Aplikasi **chatbot edukatif** berbasis **Streamlit** dan **Google Gemini** (`goo
 | Autentikasi | passlib + penyimpanan user di SQLite |
 | Ekspor PDF | fpdf2 |
 | Visualisasi dashboard | Pandas, Altair |
+| Ekstraksi PDF (RAG) | pypdf |
 
 ---
 
@@ -127,6 +138,7 @@ Salin `.env.example` menjadi `.env` lalu sesuaikan nilai berikut.
 | `MAX_RETRY_ATTEMPTS` | Tidak | Jumlah percobaan ulang saat error sementara. |
 | `RETRY_DELAY_SECONDS` | Tidak | Jeda antar percobaan (detik). |
 | `EMBEDDING_MODEL_NAME` | Tidak | Model embedding (default: `text-embedding-004`). |
+| `ADMIN_USERNAMES` | Tidak | Username dipisah koma yang dipromosikan ke **admin** saat aplikasi start (mis. `admin,budi`). Harus sama persis dengan username di database. |
 
 **Catatan:** file `.env` jangan di-commit (sudah diabaikan di `.gitignore`).
 
@@ -148,27 +160,33 @@ Akun pertama kali dibuat lewat **Register** di sidebar. Jika sebelumnya sudah ad
 
 ```
 project-ayub/
-├── app.py                 # Entry point UI Streamlit, dashboard, chat, ekspor
+├── app.py                 # Entry point UI Streamlit (Chat, Dashboard, Admin)
 ├── requirements.txt
-├── .env.example           # Template variabel lingkungan
+├── .env.example
 ├── README.md
-├── CARA_JALANKAN.md       # Panduan singkat menjalankan aplikasi
+├── CARA_JALANKAN.md
 ├── PANDUAN_INSTALASI_AYUB.md
+├── DOKUMENTASI_SISTEM.md
 ├── TROUBLESHOOTING.md
+├── scripts/
+│   ├── refresh_rag_index.py   # Rebuild cache embedding RAG (CLI)
+│   ├── backup_sqlite.py       # Salin DB ke data/backups/
+│   └── eval_rag_smoke.py      # Smoke test retrieval
 ├── src/
-│   ├── config/
-│   │   └── settings.py    # Settings, system instruction
+│   ├── config/settings.py
+│   ├── observability.py       # Logging ke logs/app.log
 │   ├── database/
 │   │   ├── connection.py
-│   │   ├── repository.py  # User, sesi, pesan, statistik dashboard
+│   │   ├── repository.py      # User, profil, admin, bookmark, prompt, RAG scope, …
 │   │   └── schema.sql
 │   └── services/
-│       ├── chatbot.py     # Gemini streaming, retry, fallback, integrasi RAG
-│       └── rag.py         # Chunking, embedding, hybrid retrieval, cache index
+│       ├── chatbot.py
+│       └── rag.py
 └── data/
-    ├── knowledge/         # Dokumen .md/.txt untuk RAG (tambah sesuai kebutuhan)
-    ├── rag_index.json     # Cache embedding (dibuat/refresh saat runtime)
-    └── app.db             # SQLite (dibuat saat pertama jalan; default di .gitignore)
+    ├── knowledge/             # .md/.txt + uploads/ (PDF → .txt)
+    ├── rag_index.json
+    ├── backups/               # Output skrip backup (opsional)
+    └── app.db                 # SQLite (default di .gitignore)
 ```
 
 ---
@@ -180,15 +198,17 @@ project-ayub/
 3. **Retrieval:** untuk setiap pertanyaan, skor **keyword** digabung dengan **cosine similarity** embedding untuk memilih potongan relevan.
 4. **Generation:** potongan terpilih dimasukkan ke konteks prompt; model menghasilkan jawaban; nama file sumber dapat ditampilkan sebagai **Sumber Belajar**.
 
+**Filter sesi:** jika `rag_scope=sttnf`, hanya potongan dari berkas yang namanya mengandung `sttnf` yang ikut retrieval.
+
 Tidak menggunakan vector database terpisah (mis. FAISS/Chroma) atau orkestrasi LangChain/LlamaIndex; pipeline disengaja dibuat **ringan** dan **self-contained**.
 
 ---
 
 ## Basis data
 
-- **SQLite** dengan tabel: `users`, `chat_sessions` (termasuk `is_pinned`), `chat_messages`.
-- File basis data mengikuti `DB_PATH` di `.env`.
-- Relasi dan indeks didefinisikan di `src/database/schema.sql`.
+- **SQLite** — tabel utama: `users` (profil, `role`, target mingguan), `chat_sessions` (`is_pinned`, `rag_scope`), `chat_messages`, `saved_prompts`, `message_bookmarks`.
+- Migrasi kolom/tabel tambahan dijalankan otomatis saat aplikasi start (`ChatRepository`).
+- File basis data mengikuti `DB_PATH` di `.env`; skema lengkap di `src/database/schema.sql`.
 
 ---
 
@@ -196,6 +216,8 @@ Tidak menggunakan vector database terpisah (mis. FAISS/Chroma) atau orkestrasi L
 
 - Password tidak disimpan plaintext; verifikasi via hash.
 - Persistensi login memakai token bertanda tangan di URL; **ganti `AUTH_SECRET_KEY`** untuk lingkungan produksi dan rahasiakan file `.env`.
+- **Admin:** tetapkan `ADMIN_USERNAMES` lalu restart app; panel Admin tidak mengirim password ke log (hanya event login sukses dicatat ringan di `logs/app.log`).
+- Unggah PDF disimpan di server (`data/knowledge/uploads/`); batasi akses folder tersebut pada deployment.
 - Untuk deployment publik, pertimbangkan HTTPS dan pembatasan rate; aplikasi ini berorientasi pengembangan lokal / akademik.
 
 ---
@@ -229,6 +251,12 @@ Detail error umum dan langkah pengecekan ada di **[TROUBLESHOOTING.md](TROUBLESH
 | [PANDUAN_INSTALASI_AYUB.md](PANDUAN_INSTALASI_AYUB.md) | Instalasi dari nol: Laragon, Cursor, venv, verifikasi |
 | [TROUBLESHOOTING.md](TROUBLESHOOTING.md) | Solusi error API, login, model, dan lainnya |
 | [DOKUMENTASI_SISTEM.md](DOKUMENTASI_SISTEM.md) | Akun uji, use case, user flow, diagram (activity/sequence/class/ER), skema DB, modul pengguna vs admin, keamanan, rute navigasi (Streamlit) |
+
+---
+
+## Status fitur (ringkas)
+
+Fitur yang dirancang untuk skripsi/demo akademik ini meliputi: chat streaming + RAG hybrid, multi-sesi, dashboard mahasiswa, ekspor MD/TXT/PDF, autentikasi multi-akun, panel admin, profil/target belajar, prompt & bookmark, filter RAG per sesi, unggah PDF ke knowledge, skrip backup/refresh/evaluasi, serta logging lokal. **Tidak** termasuk: integrasi MySQL/LMS kampus, email reset password, atau hosting produksi penuh — lihat bagian *Ringkasan* dan *Tidak termasuk*.
 
 ---
 
